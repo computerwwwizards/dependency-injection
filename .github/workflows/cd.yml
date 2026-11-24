@@ -63,4 +63,4 @@ jobs:
           install: false
 
       - name: Publish tarball to staging via OIDC
-        run: ppnpm dlx npm@latest stage publish ./release/*.tgz --access public
+        run: ppnpm stage publish ./release/*.tgz --access public --no-git-checks
