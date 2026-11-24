@@ -13,10 +13,6 @@
       "types": "./dist/presets.d.ts",
       "default": "./dist/presets.js"
     },
-    "./tutorials": {
-      "types": "./dist/tutorials.d.ts",
-      "default": "./dist/tutorials.js"
-    },
     "./types": {
       "types": "./dist/types.d.ts"
     }
