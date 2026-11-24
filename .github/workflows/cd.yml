@@ -32,4 +32,4 @@ jobs:
         run: npm test
 
       - name: Stage package on npm via OIDC
-        run: npm stage publish --access public
+        run: npm stage publish --access public --loglevel verbose
