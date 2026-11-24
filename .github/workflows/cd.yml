@@ -30,4 +30,4 @@ jobs:
         run: pnpm test
 
       - name: Stage package on npm via OIDC
-        run: pnpm dlx npm@latest stage publish --access public --loglevel verbose
+        run: pnpm dlx npm@latest stage publish --access public --dev-engines=ignore --loglevel verbose
