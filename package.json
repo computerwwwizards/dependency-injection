@@ -6,7 +6,7 @@
   "repository": {
     "type": "git",
      "url": "https://github.com/computerwwwizards/dependency-injection"
-   }
+   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
