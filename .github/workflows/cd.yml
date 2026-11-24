@@ -17,17 +17,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup pnpm, Node.js & dependencies
-        uses: pnpm/setup@v3
+      - name: Setup Node.js & npm
+        uses: actions/setup-node@v7
         with:
-          cache: false
-          require-lockfile: false
+          registry-url: https://npmjs.org
+
+      - name: Install dependencies
+        run: npm install --no-package-lock
 
       - name: Build TypeScript
-        run: pnpm build
+        run: npm run build
 
       - name: Run tests
-        run: pnpm test
+        run: npm test
 
       - name: Stage package on npm via OIDC
-        run: pnpm  stage publish --access public --no-git-checks --loglevel debug
+        run: npm stage publish --access public
