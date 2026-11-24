@@ -1920,6 +1920,17 @@ class ContainerImpl implements Container {
   }
 }
 
+const DISPOSE_SYMBOL: symbol =
+  typeof Symbol.dispose === 'symbol'
+    ? Symbol.dispose
+    : Symbol.for('Symbol.dispose');
+
+Object.defineProperty(ContainerImpl.prototype, DISPOSE_SYMBOL, {
+  value: ContainerImpl.prototype.dispose,
+  configurable: true,
+  writable: true,
+});
+
 export function createContainer(options: CreateOptions): Container {
   return new ContainerImpl(options, null);
 }
