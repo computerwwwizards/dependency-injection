@@ -20,7 +20,6 @@ jobs:
         uses: pnpm/setup@v3
         with:
           cache: false
-          args: --no-frozen-lockfile
 
       - name: Build TypeScript
         run: pnpm build
@@ -47,6 +46,11 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - name: Checkout only package.json
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: package.json
+          sparse-checkout-cone-mode: false
       - name: Download tarball artifact
         uses: actions/download-artifact@v8
         with:
