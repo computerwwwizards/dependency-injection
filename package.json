@@ -1,0 +1,51 @@
+{
+  "name": "@computerwwwwizards/dependency-injection",
+  "version": "2.0.0",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./presets": {
+      "types": "./dist/presets.d.ts",
+      "default": "./dist/presets.js"
+    },
+    "./tutorials": {
+      "types": "./dist/tutorials.d.ts",
+      "default": "./dist/tutorials.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^22.23.5",
+      "onFail": "download"
+    },
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^12.23.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=22.23.5 <23.0.0",
+    "pnpm": ">=12.23.0 <13.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  }
+}
