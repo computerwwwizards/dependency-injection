@@ -2426,9 +2426,7 @@ class AssemblerImpl implements Assembler {
     this.kernel.dispose();
   }
 
-  [Symbol.dispose](): void {
-    this.dispose();
-  }
+  declare [Symbol.dispose]: () => void;
 
   register<T, U extends NoInfer<T>, Handle>(
     token: Token<T>,
@@ -2577,6 +2575,17 @@ class AssemblerImpl implements Assembler {
     return fn;
   }
 }
+
+const DISPOSE_SYMBOL: symbol =
+  typeof Symbol.dispose === 'symbol'
+    ? Symbol.dispose
+    : Symbol.for('Symbol.dispose');
+
+Object.defineProperty(AssemblerImpl.prototype, DISPOSE_SYMBOL, {
+  value: AssemblerImpl.prototype.dispose,
+  configurable: true,
+  writable: true,
+});
 
 const extendedContainerCache = new WeakMap<Container, AssemblerImpl>();
 
