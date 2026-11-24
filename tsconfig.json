@@ -3,6 +3,8 @@
     "module": "nodenext",
     "target": "esnext",
     "strict": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "moduleDetection": "force",
