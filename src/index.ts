@@ -1061,9 +1061,8 @@ class ContainerImpl implements Container {
     }
   }
 
-  [Symbol.dispose](): void {
-    this.dispose();
-  }
+  declare [Symbol.dispose]: () => void;
+
 
   // --------------------------------------------------------------------------
   // Resolution & Runtime Capture Wiring
