@@ -27,7 +27,7 @@
   "files": [
     "dist"
   ],
-  "devEngines": {
+   "devEngines": {
     "runtime": {
       "name": "node",
       "version": "^24.15.0",
@@ -35,13 +35,13 @@
     },
     "packageManager": {
       "name": "npm",
-      "version": "^12.2.3",
+      "version": "^11.19.1",
       "onFail": "download"
     }
   },
   "engines": {
     "node": ">=24.15.0 <25.0.0",
-    "npm": ">=12.2.3 <13.0.0"
+    "npm": ">=11.19.1 <12.0.0"
   },
   "scripts": {
     "build": "tsc",
