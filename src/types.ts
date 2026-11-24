@@ -1,12 +1,14 @@
 /**
- * @module @computerwwwizards/di-kernel
+ * @module @computerwwwizards/di-kernel/types
  *
  * Pure TypeScript 6.0.3+ type specification for a synchronous, capture-tracked,
  * lattice-verified Inversion of Control (IoC) kernel.
  *
- * This file contains ONLY pure types and ambient declarations (no runtime
- * implementation, no classical DI presets). It serves as the normative contract
- * for both the kernel implementation and ahead-of-time tooling.
+ * This file contains ONLY pure types and interfaces (zero runtime code, zero
+ * ambient `declare const` / `declare function` value lies, zero `any`, zero
+ * classical DI presets). It is safe to re-export via `export type * from './types.js'`
+ * from `./index.ts` without conflicting with the runtime `TAINT_BITS` and
+ * `createContainer` exports.
  *
  * ============================================================================
  * COMPILER & RUNTIME BASELINE (NORMATIVE)
@@ -30,7 +32,7 @@
  *     }
  *   }
  *   ```
- *   (Note: `strict`, `module: "esnext"`, `target: "es2025"`, `types: []`,
+ *   (`strict`, `target: "es2025"`, `module: "esnext"`, `types: []`,
  *   `noUncheckedSideEffectImports`, and `libReplacement: false` are defaults
  *   in TS 6.0.3, listed explicitly here for contract stability.)
  *
@@ -42,15 +44,23 @@
  *    sibling containers cannot bind, resolve, or evict a descendant's tokens.
  * 2. **100% synchronous resolution:** Eliminates async interleaving hazards on
  *    ephemeral passes, cycle guards, and capture-stack tracking.
- * 3. **Frozen graph topology:** `storage`, `state`, `target`, `captures`, and
- *    `deps` are immutable after `bind()`. Rebinding is strictly provider-only,
- *    so a single `verify()` proof remains valid across all future rebinds.
- * 4. **Lexical scope isolation for `provider` targets:** A `'provider'`-targeted
- *    binding resolves its dependencies in its owning container's scope, making
- *    cross-request state leakage into ancestor singletons structurally impossible.
- * 5. **Neutral fact emission:** The kernel computes exact per-token taint
- *    bitmasks, capture relations, and diamond flags; policy enforcement and
- *    mitigations remain fully external to the kernel.
+ * 3. **Frozen graph topology:** `storage`, `state`, `target`, `captures`,
+ *    `deps`, and `discharges` are immutable after `bind()`. Rebinding is
+ *    strictly provider-only, so a single `verify()` proof remains valid across
+ *    all future factory swaps.
+ * 4. **Lexical scope isolation for `'provider'` targets:** A retained
+ *    `'provider'`-targeted binding resolves its `captures` and `deps` strictly
+ *    in its owning container's scope, making cross-request state leakage into
+ *    ancestor singletons structurally impossible.
+ * 5. **Dual-lattice local discharges:** Per-origin `discharges` move cleared
+ *    bits from `mask` into `dischargedMask` at the declaring binding site.
+ *    Across diamond branches, active taints (`mask`) join with bitwise OR (`|`,
+ *    may-taint) while inherited sanitizations (`sanitizedMask`) join with
+ *    bitwise AND (`&`, must-sanitize) so an unsanitized sibling branch can
+ *    never be masked by a sanitized one.
+ * 6. **Neutral fact emission:** The kernel computes exact per-token active
+ *    masks, discharged masks, capture relations, and diamond flags; policy
+ *    enforcement and escape-hatch ergonomics live strictly outside the kernel.
  */
 
 // ============================================================================
@@ -70,15 +80,15 @@ declare const TOKEN_BRAND: unique symbol;
  *
  * **Runtime & V8 Optimization Contract:**
  * - MUST be a plain V8 SMI integer (`0, 1, 2, ...`) allocated monotonically
- *   from the root container's `TokenSpace`—zero object allocation on creation,
- *   lookup, or storage.
- * - Compatible with `Map<AnyToken, Entry>` initially and $O(1)$ flat-array
+ *   from the root container's `TokenSpace` — zero object allocation on
+ *   creation, lookup, or storage.
+ * - Compatible with `Map<AnyToken, Entry>` today and $O(1)$ dense array
  *   indexing (`store[token]`) later without breaking any public type.
  * - Cold metadata (`owners: ContainerImpl[]`, `names: (string | undefined)[]`)
  *   MUST live in parallel arrays on `TokenSpace` and NEVER be read on the
- *   `get()` fast path unless throwing an error.
+ *   `get()` fast path unless formatting an error.
  * - Intra-hierarchy scoping (ancestor-only visibility) is enforced at runtime
- *   in $O(1)$ fast-path (`owner === this || owner === this.root`) and
+ *   in $O(1)$ fast-path (`owner === this || owner === this.root`) plus an
  *   $O(\Delta\text{depth})$ ancestor walk. Cross-root isolation between two
  *   independent `createContainer()` trees is maintained by discipline unless
  *   the runtime packs `(rootId, localId)` into the 31-bit SMI.
@@ -93,6 +103,11 @@ export type Token<T> = number & {
  * Function parameters are contravariant (`never` accepts any `T`) and return
  * types are covariant (`unknown` accepts any `T`), so every `Token<T>` is
  * assignable to `AnyToken` while raw numbers remain rejected.
+ *
+ * **Implementation Note:** Internal resolution helpers (`resolveRoot`,
+ * `resolveInternal`) MUST accept `token: AnyToken` and return `unknown` rather
+ * than `<T>(token: Token<T>)`, because passing an `AnyToken` to a generic
+ * `Token<T>` parameter infers `T = never` from the contravariant position.
  */
 export type AnyToken = number & {
   readonly [TOKEN_BRAND]: (in_: never) => unknown;
@@ -103,14 +118,14 @@ export type AnyToken = number & {
  *
  * Intentionally unconstrained on `Tok` so homomorphic tuple mappings
  * (`{ readonly [K in keyof Tokens]: TokenValue<Tokens[K]> }`) compile cleanly
- * without `TS2344` across generic tuple and variadic tuple parameters.
+ * without `TS2344` across generic, variadic, and optional tuple parameters.
  *
  * @example
  * ```ts
- * type A = TokenValue<Token<User>>;            // User
- * type B = TokenValue<AnyToken>;               // unknown
- * type C = TokenValue<Token<Foo> | Token<Bar>>;// Foo | Bar
- * type D = TokenValue<Token<never>>;           // never
+ * type A = TokenValue<Token<User>>;             // User
+ * type B = TokenValue<AnyToken>;                // unknown
+ * type C = TokenValue<Token<Foo> | Token<Bar>>; // Foo | Bar
+ * type D = TokenValue<Token<never>>;            // never
  * ```
  */
 export type TokenValue<Tok> = Tok extends {
@@ -124,7 +139,7 @@ export type TokenValue<Tok> = Tok extends {
  *
  * Handles empty, omitted, conditional, variadic, and non-tuple array inputs
  * soundly under `noUncheckedIndexedAccess: true`:
- * - `readonly []` or `undefined` -> `readonly []`
+ * - `readonly []`, `undefined`, or `never` -> `readonly []`
  * - `readonly [Token<A>, Token<B>]` -> `readonly [A, B]`
  * - `readonly [Token<A>] | undefined` -> `readonly [A] | readonly []`
  * - `Token<A>[]` -> `readonly A[]` (indexing yields `A | undefined`)
@@ -142,12 +157,13 @@ export type ResolvedTuple<Tokens extends readonly AnyToken[] | undefined> = [
  *
  * **V8 Optimization Contract:**
  * - Thunks MUST be cached per `(container, token)` via a top-level minimal
- *   factory capturing only `(container, token)`—never closed over `bind()` or
- *   `resolveInternal()` stack frames.
+ *   factory capturing only `(container, token)` — never closed over `bind()`
+ *   or `resolveInternal()` stack frames.
  * - For `this === binding.owner`, cache the entire thunk tuple directly on
  *   `InternalBinding` so repeated `get()` calls allocate zero arrays/closures.
- * - Invoking a thunk MUST detach from the active capture stack using an integer
- *   watermark (`capturerBase = capturerStack.length`), NEVER `Array.splice()`.
+ * - Invoking a thunk MUST detach from both active capture and ephemeral stacks
+ *   using integer watermarks (`capturerBase`, `ephemeralBase`), NEVER
+ *   `Array.prototype.splice()`.
  */
 export type ThunkTuple<Tokens extends readonly AnyToken[] | undefined> = [
   Tokens,
@@ -160,7 +176,7 @@ export type ThunkTuple<Tokens extends readonly AnyToken[] | undefined> = [
 /**
  * Exact return type of `bind()` and `bindInsecure()` across every boolean
  * state of `rebindable?: R`:
- * - `false`, `undefined`, `false | undefined` -> `void`
+ * - `false`, `undefined`, `false | undefined`, `never` -> `void`
  * - `true` -> `Fn` (guaranteed capability handle)
  * - `boolean`, `true | undefined`, `boolean | undefined` -> `Fn | undefined`
  *   (forces callers to narrow when `rebindable` is computed dynamically).
@@ -180,8 +196,8 @@ export type BindResult<Fn, R extends boolean | undefined> = [R] extends [
 /**
  * Storage tiers backed by a container-owned store (`Map<AnyToken, StoredEntry>`
  * or future dense array).
- * - `'solid'`: Strongly held until `evict()`, provider rebind, or `dispose()`.
- * - `'weak'`: Weakly held via `WeakRef`; subject to V8 GC reclamation.
+ * - `'solid'`: Strongly retained until `evict()`, provider rebind, or `dispose()`.
+ * - `'weak'`: Weakly retained via `WeakRef`; subject to V8 GC reclamation.
  */
 export type RetainedStorage = 'solid' | 'weak';
 
@@ -192,6 +208,8 @@ export type RetainedStorage = 'solid' | 'weak';
  *   binding links directly to retained dependencies behind a `'none'` bridge).
  * - `'ephemeral'`: Shared across a single outermost `get()` pass; flushed in
  *   LIFO order via a dedicated `ephemeralOrder` stack when `pass.depth === 0`.
+ *   Diamond cache hits MUST forward retained entries captured during the
+ *   ephemeral's initial construction to any subsequent retained capturer.
  * - `'solid'` / `'weak'`: See {@link RetainedStorage}.
  *
  * **V8 Optimization Contract:**
@@ -217,8 +235,8 @@ export type StateKind = 'stateless' | 'stateful';
  * - `'provider'` (default):
  *   - Stored on the container where `bind()` was called (`binding.owner`).
  *   - Validated eagerly at `bind()` time against `owner.allowedStores`.
- *   - **Lexical Resolution Rule:** Resolves its `captures` and `deps` against
- *     `binding.owner` (NEVER against a descendant `caller`), structurally
+ *   - **Lexical Resolution Rule:** Resolves its `captures` and `deps` strictly
+ *     against `binding.owner` (NEVER against a descendant `caller`), structurally
  *     preventing child overrides or request state from polluting ancestor stores.
  *
  * - `'caller'`:
@@ -239,8 +257,9 @@ export type StorageTarget = 'provider' | 'caller';
  * - `'cascade'` (default): Reverse-topologically evicts all live capturers
  *   first (dependents disposed before dependency), eliminating split-brain state.
  * - `'block'`: Throws {@link KernelError} (`'eviction-blocked'`). Note:
- *   `dispose()` MUST evict retained stores in LIFO instantiation order so normal
- *   container shutdown succeeds cleanly even under `'block'`.
+ *   `dispose()` MUST evict retained stores in exact LIFO instantiation order
+ *   (across both `'solid'` and `'weak'` stores via an intrusive doubly-linked
+ *   list) so normal container shutdown succeeds cleanly even under `'block'`.
  * - `'orphan'`: Severs capture links without evicting capturers (explicit opt-in
  *   to detached references).
  */
@@ -250,15 +269,15 @@ export type EvictCapturedPolicy = 'cascade' | 'block' | 'orphan';
 export type PolicyAction = 'allow' | 'warn' | 'deny';
 
 // ============================================================================
-// 3. FACTORIES, REBIND CAPABILITIES & DISCRIMINATED BIND OPTIONS
+// 3. FACTORIES, REBIND CAPABILITIES, DISCHARGES & DISCRIMINATED BIND OPTIONS
 // ============================================================================
 
 /**
  * Statically verified factory function.
  *
- * - `this: void`: Prevents accidental `this` reliance (at runtime the kernel
- *   invokes the factory detached from options objects) and works seamlessly
- *   with TS 6.0's non-contextually-sensitive `this`-less functions.
+ * - `this: void`: Prevents accidental `this` reliance (the kernel invokes
+ *   factories detached from options/binding objects) and pairs cleanly with
+ *   TS 6.0's non-contextually-sensitive `this`-less functions.
  * - `captured`: Eagerly resolved values in positional order of `captures`.
  * - `deps`: Lazy `() => T` thunks in positional order of `deps`.
  */
@@ -276,12 +295,13 @@ export type Factory<
  * Object-capability handle returned exclusively by `bind(..., { rebindable: true })`.
  *
  * Replaces ONLY the factory implementation while preserving `storage`, `state`,
- * `target`, `captures`, and `deps` so graph topology and `verify()` proofs
- * remain permanently valid.
+ * `target`, `captures`, `deps`, and `discharges` so graph topology and
+ * `verify()` proofs remain permanently valid.
  *
- * **Eviction Contract:**
- * - `target === 'provider'` + retained storage: immediately evicts the cached
- *   instance on `binding.owner` (applying `owner.onEvictCaptured`).
+ * **Eviction & Atomicity Contract:**
+ * - `target === 'provider'` + retained storage: MUST evict the cached instance
+ *   on `binding.owner` BEFORE swapping `binding.factory` so an `'eviction-blocked'`
+ *   failure leaves the binding unchanged (strong exception safety).
  * - `target === 'caller'`: updates the factory for future resolutions ONLY;
  *   ancestor containers MUST NOT retain strong references to child containers
  *   to cascade rebinds (which would leak ephemeral request scopes).
@@ -318,11 +338,28 @@ export type InsecureRebindFn<T> = (
 ) => void;
 
 /**
+ * Per-origin taint discharge entry: `[originToken, bitmaskToDischarge]`.
+ *
+ * Used by local escape-hatch presets (e.g., startup snapshots, stateful weak
+ * memo caches) to sanitize a known taint at the exact binding site instead of
+ * weakening a repository-wide policy.
+ *
+ * - Pass `[selfToken, mask]` to discharge intrinsic `'self'` taints
+ *   (e.g., `TAINT_BITS['volatile-state']` on an intentional weak memo cache).
+ * - Pass `[originToken, mask]` to discharge a direct or transitive capture
+ *   taint (e.g., `TAINT_BITS['frozen-none']` on an intentional snapshot).
+ * - Every `origin` token in `discharges` MUST be in scope for the binding's
+ *   container (validated in `bind()` / `bindInsecure()`).
+ * - Multiple entries for the same `origin` combine via bitwise OR (`|`).
+ */
+export type TaintDischarge = readonly [origin: AnyToken, mask: TaintMask];
+
+/**
  * Shared option fields for verified `bind()` calls.
  *
  * **Critical Type-Inference Note (`exactOptionalPropertyTypes: true`):**
  * `captures`, `deps`, and `rebindable` intentionally do NOT append `| undefined`
- * to the property annotation itself—instead, `| undefined` lives on the type
+ * to the property annotation itself — instead, `| undefined` lives on the type
  * parameter constraints (`Caps`, `Deps`, `R`). Appending `| undefined` to the
  * property would cause TypeScript to strip `undefined` when matching conditional
  * inputs like `rebindable: flag as true | undefined` or `captures: cond ? [Tok] : undefined`,
@@ -330,7 +367,7 @@ export type InsecureRebindFn<T> = (
  *
  * **Runtime Disjointness Note:**
  * Duplicate tokens within `captures`/`deps` and `captures ∩ deps` overlap MUST
- * be validated at runtime in `bind()`, NOT via type-level exclusion—distinct
+ * be validated at runtime in `bind()`, NOT via type-level exclusion — distinct
  * tokens commonly share the same payload type (e.g., two `Token<string>` values),
  * which are structurally indistinguishable at the type level.
  */
@@ -354,6 +391,13 @@ interface BaseBindOptions<
    * @default false
    */
   readonly rebindable?: R;
+  /**
+   * Per-origin taint bits explicitly discharged (sanitized) at this binding site.
+   * Discharged bits move from `fact.mask` into `fact.dischargedMask` and remain
+   * sanitized along this branch in ancestor folds (unless another diamond branch
+   * reaches `origin` without discharging those bits).
+   */
+  readonly discharges?: readonly TaintDischarge[] | undefined;
 }
 
 /** Options for `storage: 'none'` (factory-direct; never stored; no disposal hooks). */
@@ -414,14 +458,15 @@ export interface SolidBindOptions<
  *
  * **Compile-Time Guard (`T extends object`):**
  * Rejects primitives (`string`, `number`, `boolean`, `bigint`, `null`,
- * `undefined`, `void`, `symbol`) and nullable unions (`User | null`).
- * `symbol` is deliberately excluded even though ES2023 `WeakKey` permits
- * non-registered symbols, because TypeScript cannot distinguish `Symbol()` from
- * `Symbol.for()` (which throws a `TypeError` in `WeakRef` at runtime).
+ * `undefined`, `void`, `symbol`), `never`, `unknown`, `{}`, and nullable unions
+ * (`User | null`). `symbol` is deliberately excluded even though ES2023
+ * `WeakKey` permits non-registered symbols, because TypeScript cannot
+ * distinguish `Symbol()` from `Symbol.for()` (which throws a `TypeError` in
+ * `WeakRef` at runtime).
  *
  * **GC Honesty:**
  * `instance` is `T | undefined` because `FinalizationRegistry` cannot hand back
- * an already-collected object, and a capturer may release its strong reference
+ * an already-collected object, and a capturer may drop its strong reference
  * before being evicted.
  *
  * **V8 Optimization Contract:**
@@ -450,10 +495,11 @@ export interface WeakBindOptions<
 /**
  * Discriminated union of all legal verified binding options for payload `T`.
  *
- * Uses non-distributive `[T] extends [object]` + `Extract<T, object>` so:
+ * Uses non-distributive `[T] extends [never]` + `[T] extends [object]` +
+ * `Extract<T, object>` so:
  * - Object & function types (`User`, `() => void`, `Foo | Bar`) enable `'weak'`.
- * - Primitives, `{}` (accepts primitives), `unknown`, and nullable unions
- *   (`User | null`) reject `storage: 'weak'` at compile time with zero `TS2344`.
+ * - Primitives, `never`, `{}`, `unknown`, and nullable unions (`User | null`)
+ *   reject `storage: 'weak'` at compile time with zero `TS2344`.
  */
 export type BindOptions<
   T,
@@ -464,54 +510,82 @@ export type BindOptions<
   | NoneBindOptions<Caps, Deps, R>
   | EphemeralBindOptions<T, Caps, Deps, R>
   | SolidBindOptions<T, Caps, Deps, R>
-  | ([T] extends [object]
-      ? WeakBindOptions<Extract<T, object>, Caps, Deps, R>
-      : never);
+  | ([T] extends [never]
+      ? never
+      : [T] extends [object]
+        ? WeakBindOptions<Extract<T, object>, Caps, Deps, R>
+        : never);
+
+/** Options for `bindInsecure()` with `storage: 'none'`. */
+export interface InsecureNoneBindOptions<R extends boolean | undefined = false> {
+  readonly storage: 'none';
+  readonly rebindable?: R;
+  readonly discharges?: readonly TaintDischarge[] | undefined;
+}
+
+/** Options for `bindInsecure()` with `storage: 'ephemeral'`. */
+export interface InsecureEphemeralBindOptions<
+  T,
+  R extends boolean | undefined = false,
+> {
+  readonly storage: 'ephemeral';
+  readonly rebindable?: R;
+  readonly discharges?: readonly TaintDischarge[] | undefined;
+  readonly onDispose?: ((this: void, instance: T) => void) | undefined;
+}
+
+/** Options for `bindInsecure()` with `storage: 'solid'`. */
+export interface InsecureSolidBindOptions<
+  T,
+  R extends boolean | undefined = false,
+> {
+  readonly storage: 'solid';
+  /** @default 'provider' */
+  readonly target?: StorageTarget | undefined;
+  readonly rebindable?: R;
+  readonly discharges?: readonly TaintDischarge[] | undefined;
+  readonly onDispose?: ((this: void, instance: T) => void) | undefined;
+  readonly onDecapture?:
+    | ((this: void, instance: T, remaining: number) => void)
+    | undefined;
+}
+
+/** Options for `bindInsecure()` with `storage: 'weak'` (objects/functions only). */
+export interface InsecureWeakBindOptions<
+  T extends object,
+  R extends boolean | undefined = false,
+> {
+  readonly storage: 'weak';
+  /** @default 'provider' */
+  readonly target?: StorageTarget | undefined;
+  readonly rebindable?: R;
+  readonly discharges?: readonly TaintDischarge[] | undefined;
+  readonly onDispose?:
+    | ((this: void, instance: T | undefined) => void)
+    | undefined;
+  readonly onDecapture?:
+    | ((this: void, instance: T | undefined, remaining: number) => void)
+    | undefined;
+}
 
 /**
  * Discriminated options for `bindInsecure()`.
  * Omits `state`, `captures`, and `deps`; statically treated as `state: 'stateful'`
- * with intrinsic `'insecure'` taint. Enforces `[T] extends [object]` for `'weak'`.
+ * with intrinsic `'insecure'` taint. Enforces `[T] extends [object]` (and
+ * excludes `never`) for `'weak'`.
  */
 export type InsecureBindOptions<
   T,
   R extends boolean | undefined = false,
 > =
-  | {
-      readonly storage: 'none';
-      readonly rebindable?: R;
-    }
-  | {
-      readonly storage: 'ephemeral';
-      readonly rebindable?: R;
-      readonly onDispose?: ((this: void, instance: T) => void) | undefined;
-    }
-  | {
-      readonly storage: 'solid';
-      readonly target?: StorageTarget | undefined;
-      readonly rebindable?: R;
-      readonly onDispose?: ((this: void, instance: T) => void) | undefined;
-      readonly onDecapture?:
-        | ((this: void, instance: T, remaining: number) => void)
-        | undefined;
-    }
-  | ([T] extends [object]
-      ? {
-          readonly storage: 'weak';
-          readonly target?: StorageTarget | undefined;
-          readonly rebindable?: R;
-          readonly onDispose?:
-            | ((this: void, instance: Extract<T, object> | undefined) => void)
-            | undefined;
-          readonly onDecapture?:
-            | ((
-                this: void,
-                instance: Extract<T, object> | undefined,
-                remaining: number
-              ) => void)
-            | undefined;
-        }
-      : never);
+  | InsecureNoneBindOptions<R>
+  | InsecureEphemeralBindOptions<T, R>
+  | InsecureSolidBindOptions<T, R>
+  | ([T] extends [never]
+      ? never
+      : [T] extends [object]
+        ? InsecureWeakBindOptions<Extract<T, object>, R>
+        : never);
 
 /** Container creation options for both root and child containers. */
 export interface CreateOptions {
@@ -544,7 +618,8 @@ export interface CreateOptions {
  * - `'frozen-none'`: `solid`, `weak`, or `ephemeral` caches a `none` instance.
  * - `'volatile-state'`: `weak` stores a `stateful` or insecure binding.
  * - `'state-leak'`: `stateless` captures a `stateful` or insecure dependency.
- * - `'split-state-diamond'`: Diamond collision on a `none` + (`stateful` | `insecure`) token.
+ * - `'split-state-diamond'`: Diamond collision on a `none` + (`stateful` | `insecure`)
+ *   token, or two distinct bindings for the same shadowed token where either is stateful.
  * - `'shared-diamond'`: Diamond collision on a shared or stateless token.
  * - `'insecure'`: Bound via `bindInsecure()`, or captures an insecure binding.
  * - `'thunk-cycle'`: Node participates in a lazy cycle involving >= 1 `deps` edge.
@@ -571,18 +646,22 @@ export type TaintTag =
   | 'thunk-cycle';
 
 /**
- * Normative 13-bit SMI bitmask layout for {@link TaintTag}.
+ * Normative 13-bit SMI bitmask layout implemented by the runtime `TAINT_BITS`
+ * export in `./index.ts`.
  *
  * **V8 Optimization Contract:**
  * - All lattice merges MUST execute via single-instruction bitwise OR
- *   (`acc.mask |= incomingMask`), and direct storage checks MUST index a
- *   16-entry `Uint16Array` lookup table (`DIRECT_STORAGE_MATRIX[(a << 2) | b]`).
+ *   (`acc.mask |= incomingMask`) and must-sanitize joins via bitwise AND
+ *   (`acc.sanitizedMask &= incomingSanitized`).
+ * - Direct storage checks MUST index a 16-entry `Uint16Array` lookup table
+ *   (`DIRECT_STORAGE_MATRIX[(a << 2) | b]`).
  * - Local-only / dependent-relative bits (`'escaped-ephemeral'`,
  *   `'eviction-coupled'`, `'frozen-none'`, `'weak-pinned'`, `'pinned-mutable'`,
  *   `'captive-caller'`) MUST be masked off during upward propagation and
- *   recomputed against each ancestor's own `(storage, target)`.
+ *   recomputed against each ancestor's own `(storage, target)` minus the
+ *   branch's `sanitizedMask`.
  */
-export declare const TAINT_BITS: {
+export interface TaintBitsMap {
   readonly insecure: 1;
   readonly 'eviction-coupled': 2;
   readonly 'captive-ephemeral': 4;
@@ -596,10 +675,10 @@ export declare const TAINT_BITS: {
   readonly 'split-state-diamond': 1024;
   readonly 'shared-diamond': 2048;
   readonly 'thunk-cycle': 4096;
-};
+}
 
-/** Single power-of-two bit literal from {@link TAINT_BITS}. */
-export type TaintBit = (typeof TAINT_BITS)[TaintTag];
+/** Single power-of-two bit literal from {@link TaintBitsMap}. */
+export type TaintBit = TaintBitsMap[TaintTag];
 
 /** Bitwise union (`|`) of zero or more {@link TaintBit} flags (fits in V8 SMI). */
 export type TaintMask = number;
@@ -619,41 +698,52 @@ export type CaptureRelation = 'self' | 'direct' | 'transitive';
  * captured subgraph.
  *
  * **Optimization Contract:**
- * Implementations MAY materialize `taints` lazily (via a getter decoding `mask`)
- * so `verify()` with bitmask-based policies pays zero `Set` allocation overhead
- * for allowed entries.
+ * Implementations SHOULD materialize `taints` and `dischargedTaints` lazily
+ * (via getters decoding `mask` and `dischargedMask`, returning a shared empty
+ * `ReadonlySet` when the mask is `0`) so `verify()` with bitmask-based policies
+ * pays zero `Set` allocation overhead.
  */
 export interface FoldedTokenFact {
   readonly origin: AnyToken;
   readonly relation: CaptureRelation;
   /** `true` iff `origin` was reached via 2+ distinct capture paths (diamond). */
   readonly diamond: boolean;
-  /** Bitwise OR of all active {@link TAINT_BITS} for `(dependent, origin)`. */
+  /** Bitwise OR of all active (undischarged) {@link TaintBitsMap} flags. */
   readonly mask: TaintMask;
-  /** Decoded readonly view matching `mask`. */
+  /** Bitwise OR of {@link TaintBitsMap} flags explicitly discharged at this binding site. */
+  readonly dischargedMask: TaintMask;
+  /** Lazily decoded readonly view matching active `mask`. */
   readonly taints: ReadonlySet<TaintTag>;
+  /** Lazily decoded readonly view matching `dischargedMask`. */
+  readonly dischargedTaints: ReadonlySet<TaintTag>;
 }
 
 /**
  * Policy evaluator invoked by `verify()` for every non-trivial `(dependent, fact)`
- * entry (`fact.mask !== 0 || fact.diamond`).
+ * entry (`fact.mask !== 0 || fact.dischargedMask !== 0 || fact.diamond`).
+ *
+ * Because `verify()` still invokes `policy` when `fact.mask === 0` and
+ * `fact.dischargedMask !== 0`:
+ * - Standard policies testing `(fact.mask & denyMask) !== 0` automatically stay
+ *   silent on locally discharged escape hatches.
+ * - Audit policies testing `(fact.dischargedMask & forbidMask) !== 0` can still
+ *   detect and deny escape hatches in security-critical modules.
  *
  * @example
  * ```ts
- * // Allow ConfigToken snapshots; deny captive traps; warn only at direct sites
- * const policy: PolicyRule = (_dependent, fact) => {
- *   if (fact.origin === ConfigToken && fact.mask === TAINT_BITS['frozen-none']) {
- *     return 'allow';
- *   }
+ * // Standard policy: denies fatal undischarged taints, stays silent on discharges
+ * const strict: PolicyRule = (_dep, fact) => {
  *   const fatal =
  *     TAINT_BITS['captive-ephemeral'] |
  *     TAINT_BITS['captive-caller'] |
  *     TAINT_BITS['split-state-diamond'];
- *   if ((fact.mask & fatal) !== 0) return 'deny';
- *   if (fact.relation === 'direct' && (fact.mask & TAINT_BITS['frozen-none']) !== 0) {
- *     return 'warn';
- *   }
- *   return 'allow';
+ *   return (fact.mask & fatal) !== 0 ? 'deny' : 'allow';
+ * };
+ *
+ * // Audit policy: forbids any escape-hatch discharge on PaymentToken
+ * const audit: PolicyRule = (dep, fact) => {
+ *   if (dep === PaymentToken && fact.dischargedMask !== 0) return 'deny';
+ *   return strict(dep, fact);
  * };
  * ```
  */
@@ -740,7 +830,7 @@ export interface KernelError extends Error {
 }
 
 // ============================================================================
-// 6. CONTAINER CONTRACT & ROOT FACTORY
+// 6. CONTAINER CONTRACT & ROOT FACTORY SIGNATURE
 // ============================================================================
 
 /**
@@ -751,17 +841,26 @@ export interface KernelError extends Error {
  * **V8 / Implementation Optimization Contract:**
  * 1. **Monomorphic hidden classes:** Internal structs (`InternalBinding`,
  *    `StoredEntry`, `EphemeralEntry`, `PassContext`, `TokenSpace`) MUST be
- *    concrete classes with fixed field order—never dynamically add/delete keys.
- * 2. **Zero hot-path closures or temporary arrays:** Use indexed `for`/`while`
- *    loops across resolution, eviction cascade, and `verify()` DFS/fold; hoist
- *    recursive helpers to module scope so they capture zero lexical context.
- * 3. **Map-backed stores (current phase):** Key `solidStore`, `weakStore`,
- *    `bindings`, and `ephemeral` by SMI `AnyToken`. Note: while TS 6.0 `esnext`
- *    adds `Map.prototype.getOrInsertComputed`, prefer direct `get`/`set` on
- *    hot paths unless the callback is a zero-allocation top-level function.
- * 4. **LIFO teardown:** `dispose()` MUST evict retained stores in reverse
- *    insertion order so dependents dispose cleanly before their dependencies
- *    even under `onEvictCaptured: 'block'`.
+ *    concrete classes with fixed field initialization order (never dynamically
+ *    add or `delete` properties).
+ * 2. **Warm solid fast path:** On outermost lookups (`pass.depth === 0`),
+ *    hitting `this.solidStore` returns immediately with a single `Map.get(smi)`
+ *    (zero `try/finally`, zero stack ops, zero allocations). Shadowing a token
+ *    that already has a cached `caller`-targeted entry on a child container
+ *    MUST eagerly evict that entry at `bind()` time so the fast path can never
+ *    serve stale instances.
+ * 3. **Zero hot-path closures or temporary arrays:** Use indexed `for`/`while`
+ *    loops across resolution, validation, eviction cascade, and `verify()`
+ *    DFS/fold; hoist recursive verification helpers to module scope so they
+ *    capture zero lexical context.
+ * 4. **Lazy capture `Set`s & intrusive LIFO list:** `StoredEntry.capturing` and
+ *    `capturedBy` SHOULD remain `null` until an edge actually forms. Retained
+ *    entries (`solid` + `weak` unified) SHOULD link into an intrusive
+ *    doubly-linked list on their owning container for $O(1)$ insertion/removal
+ *    and zero-allocation exact LIFO `dispose()`.
+ * 5. **Shadow-aware static verification:** `verify()` DFS and memo tables MUST
+ *    key on internal binding identity rather than `AnyToken` alone so child
+ *    shadowing never corrupts ancestor folds.
  */
 export interface Container extends Disposable {
   /** `true` after {@link dispose} has completed. Zero-cost boolean field read. */
@@ -772,7 +871,7 @@ export interface Container extends Disposable {
    * descendants. Parent and sibling containers reject this token at runtime
    * with {@link KernelError} (`'token-out-of-scope'`).
    *
-   * Always provide an explicit type argument `<T>` (omitting `<T>` infers `unknown`).
+   * Always provide an explicit type argument `<T>`.
    *
    * @param debugName Cold diagnostic label stored outside the token value.
    *
@@ -781,7 +880,7 @@ export interface Container extends Disposable {
    * const DbToken = app.createToken<Database>('Db');
    * ```
    */
-  createToken<T>(debugName?: string): Token<T>;
+  createToken<T>(debugName?: string | undefined): Token<T>;
 
   /** Returns the cold diagnostic name for `token`, or a fallback (`Token#<id>`). */
   getTokenName(token: AnyToken): string;
@@ -838,17 +937,18 @@ export interface Container extends Disposable {
    *   () => new AuthService()
    * );
    *
-   * // 2. Captures Db eagerly (arg 1), reads Auth lazily via thunk (arg 2) -> void
+   * // 2. Captures Db eagerly, reads Auth lazily via thunk, discharges frozen-none on Config
    * app.bind(
    *   CtrlToken,
    *   {
    *     storage: 'solid',
    *     state: 'stateless',
-   *     captures: [DbToken],
+   *     captures: [DbToken, ConfigToken],
    *     deps: [AuthToken],
+   *     discharges: [[ConfigToken, TAINT_BITS['frozen-none']]],
    *     onDispose(ctrl) { ctrl.shutdown(); },
    *   },
-   *   ([db], [getAuth]) => new Controller(db, getAuth)
+   *   ([db, cfg], [getAuth]) => new Controller(db, cfg, getAuth)
    * );
    *
    * // 3. Caller-targeted binding (per-request scope without hardcoded presets)
@@ -909,13 +1009,14 @@ export interface Container extends Disposable {
 
   /**
    * Runs structural validation, detects thunk cycles, executes the bottom-up
-   * token-keyed bitmask fold, and evaluates `policy` across all effective
-   * bindings visible from this container. Pure read-only pass (zero instantiation).
+   * token-keyed dual-lattice bitmask fold, and evaluates `policy` across all
+   * effective bindings visible from this container. Pure read-only pass (zero
+   * instantiation).
    */
   verify(policy?: PolicyRule | undefined): VerificationReport;
 
   /**
-   * Disposes all retained instances owned by this container in LIFO order,
+   * Disposes all retained instances owned by this container in exact LIFO order,
    * cascades decaptures to ancestor dependencies, clears cached thunks, and
    * marks this container permanently disposed. Idempotent.
    */
@@ -925,5 +1026,8 @@ export interface Container extends Disposable {
   [Symbol.dispose](): void;
 }
 
-/** Creates an isolated root {@link Container} with its own `TokenSpace` and `PassContext`. */
-export declare function createContainer(options: CreateOptions): Container;
+/** Signature of the root container factory implemented in `./index.ts`. */
+export type CreateContainerFn = (
+  this: void,
+  options: CreateOptions
+) => Container;
