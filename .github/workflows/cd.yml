@@ -1,0 +1,62 @@
+name: Build & Staging Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, Test & Pack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm, Node.js & dependencies
+        uses: pnpm/setup@v3
+        with:
+          cache: false
+          args: --no-frozen-lockfile
+
+      - name: Build TypeScript
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Pack tarball
+        run: pnpm pack --pack-destination ./release
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-tarball
+          path: release/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-staging:
+    name: Publish to Staging
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - name: Download tarball artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-tarball
+          path: ./release
+
+      - name: Setup pnpm & Node.js
+        uses: pnpm/setup@v3
+        with:
+          install: false
+
+      - name: Publish tarball to staging via OIDC
+        run: pnpm stage publish ./release/*.tgz --access public
