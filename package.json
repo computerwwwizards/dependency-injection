@@ -3,6 +3,10 @@
   "version": "2.0.0",
   "private": false,
   "type": "module",
+  "repository": {
+    "type": "git",
+     "url": "https://github.com/computerwwwizards/dependency-injection"
+   }
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
