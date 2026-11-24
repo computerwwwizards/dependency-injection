@@ -6,6 +6,7 @@ A synchronous, statically verified dependency assembler for TypeScript 6+.
 - **Plain TypeScript:** Register classes, functions, values, async initializers, or manual factories directly.
 - **Catch lifecycle bugs at boot:** Static lattice verification detects captive scopes, split-state diamonds, purity leaks, and cycles *before a single service is instantiated*.
 - **Stay synchronous, stay async-friendly:** Lift any async initializer (or even a synchronous class) into a promisified virtual proxy (`Promisified<T>`) while keeping the container 100% synchronous.
+- **Universal runtime support:** Runs on Safari, Chrome, Firefox, Node, Deno, and Bun with zero polyfills. Explicit Resource Management (`using` / `Symbol.dispose`) is completely optional.
 - **Zero lock-in:** `Assembler` extends the core `Container` directly—same integer tokens, same stores, drop down to raw plumbing or wrap an existing container at any time.
 
 > This guide covers the ergonomic **Assembler & Presets** layer (`@computerwwwizards/dependency-injection/presets`). Documentation for the lower-level core kernel is published separately.
@@ -14,8 +15,8 @@ A synchronous, statically verified dependency assembler for TypeScript 6+.
 
 ## Requirements
 
-- **TypeScript:** `>= 6.0.3` (`strict: true`, `exactOptionalPropertyTypes: true`, `noUncheckedIndexedAccess: true`, `erasableSyntaxOnly: true`, `lib: ["es2025", "esnext.disposable"]`)
-- **Runtime:** Any modern JS engine with `WeakRef`, `FinalizationRegistry`, `Proxy`, and `Symbol.dispose` (Node 22+, Bun, Deno, modern browsers)
+- **TypeScript:** `>= 6.0.3` (`strict: true`, `exactOptionalPropertyTypes: true`, `noUncheckedIndexedAccess: true`, `erasableSyntaxOnly: true`)
+- **Runtime:** Standard ES2021+ (`WeakRef`, `FinalizationRegistry`, `Proxy`) — works across Safari, Chrome, Firefox, Node 22+, Bun, and Deno.
 
 ```bash
 npm install @computerwwwizards/dependency-injection
@@ -60,8 +61,8 @@ class Greeter {
   }
 }
 
-// 2. Create an assembler (`using` disposes all retained instances on block exit)
-using app = createAssembler();
+// 2. Create an assembler
+const app = createAssembler();
 
 // 3. Mint typed tokens (plain SMI integers at runtime, scoped to `app` and its children)
 const Prefix = app.createToken<string>('Prefix');
@@ -87,40 +88,22 @@ console.log(app.get(Banner));
 // Output: *** [APP] Hello, World! ***
 ```
 
-Notice what TypeScript checked for you here:
+What TypeScript and `assertVerified()` already proved here:
 - `Logger`'s constructor expects `(prefix: string)`. Passing a `Token<number>` inside `inject: [...]` is a **compile-time error**.
 - Passing too many or too few tokens in `inject: [...]` is a **compile-time error**.
-- Passing a token from a sibling scope or forgetting to register `Prefix` is caught immediately by `app.assertVerified()`.
+- Forgetting to register `Prefix` or wiring a cycle is caught immediately by `app.assertVerified()`.
 
 ---
 
-## 2. The Mental Model (Everything Fits in Your Head)
+## 2. The Mental Model
 
-Before diving into lifetimes and proxies, keep three rules in mind:
+Keep three rules in mind—everything else follows directly from them:
 
-### Rule 1: Tokens belong to a container hierarchy
-There is no global token registry. Calling `app.createToken<T>('Name')` mints an integer token owned by `app`.
-- Every child scope created from `app` **inherits** `app`'s tokens.
-- A token minted inside a child scope is **private** to that child (and its descendants). Parents and sibling scopes cannot read, bind, or evict it.
-
-### Rule 2: Every dependency edge is either a **Capture** or a **Lazy Firewall**
-
-```text
-  CAPTURE (default: bare Token)
-  ServiceA ──────[eager value]──────▶ ServiceB
-  - Resolved before ServiceA is constructed
-  - Tracked statically (taints & diamonds)
-  - Tracked at runtime (evicting ServiceB cascades into ServiceA)
-
-  LAZY FIREWALL (viaThunk / viaLive / viaAsync)
-  ServiceA - - - [lazy lookup] - - -▶ ServiceB
-  - Resolved on demand when called
-  - Breaks cycles and STOPS taint propagation (captive scopes, rebindable, insecure)
-  - Evicting or rebinding ServiceB does NOT evict ServiceA
-```
-
-### Rule 3: `assertVerified()` proves graph safety without running your code
-Calling `app.assertVerified(POLICIES.strict)` inspects every binding's lifetime, purity (`stateless` vs `stateful`), mutability (`rebindable`), and capture graph **without invoking a single constructor or factory**. If something is structurally broken or violates policy, it fails fast at startup with an exact edge-by-edge report.
+1. **Tokens belong to a container hierarchy:** There is no global registry. `app.createToken<T>('Name')` mints an integer token owned by `app`. Child scopes inherit ancestor tokens; child-minted tokens are invisible to parents and siblings.
+2. **Every dependency edge is either a Capture or a Lazy Firewall:**
+   - **Capture (default: bare `Token`):** Resolved eagerly before the dependent is constructed. Tracked statically for lifetime/purity taints and tracked at runtime so evicting a dependency cascades into its capturers.
+   - **Lazy Firewall (`viaThunk` / `viaLive` / `viaAsync`):** Resolved on demand. Breaks cycles, stops taint propagation (captive scopes, mutable rebinds, insecure code), and isolates dependents from eviction cascades.
+3. **`assertVerified()` proves graph safety without running code:** It inspects every binding's lifetime, purity (`stateless` vs `stateful`), mutability (`rebindable`), and capture graph without invoking a single factory or constructor.
 
 ---
 
@@ -138,14 +121,14 @@ Presets are plain, zero-lock-in option objects. They work identically in `regist
 | `weak()` | `weak` | Provider | `stateless` | GC-managed cache for stateless objects/functions (primitives rejected at compile time) |
 | `memo(tok)` | `weak` | Provider | `stateful` | Escape-hatch preset for intentional stateful weak caches (discharges `volatile-state`) |
 
-Every preset accepts **three call shapes** (zero object-spread syntax needed):
+Every preset accepts **three call shapes** (no object-spread boilerplate):
 - `pure()` — no arguments (returns a frozen zero-allocation default).
 - `pure({ inject: [TokA, TokB], onDispose })` — positional injection for `registerClass` / `registerFn`.
 - `pure({ captures: [TokA], deps: [TokB], onDispose })` — direct options for manual `bind` / `registerFactory`.
 
 ### Per-Request Scopes (`scoped()` + `createRequestScope`)
 
-Bind `scoped()` services **once** on the root assembler. Each child scope gets its own isolated instance and automatically disposes it on block exit via `using`:
+Bind `scoped()` services **once** on the root assembler. Each request creates a child scope, resolves its own isolated instances, and disposes the scope when finished:
 
 ```ts
 import {
@@ -155,7 +138,7 @@ import {
   singleton,
 } from '@computerwwwizards/dependency-injection/presets';
 
-using app = createAssembler();
+const app = createAssembler();
 
 const DbPool = app.createToken<{ query(sql: string): string }>('DbPool');
 const ReqId = app.createToken<string>('RequestId');
@@ -186,24 +169,31 @@ app.registerFn(
 );
 
 // Request #1
-{
-  using req1 = app.createRequestScope();
+const req1 = app.createRequestScope();
+try {
   req1.registerValue(ReqId, 'REQ-001');
   req1.assertVerified(POLICIES.strict);
 
   console.log(req1.get(UserRepo).findCurrent());
+} finally {
+  req1.dispose();
 }
-// Console output when `req1` exits the block:
+// Output:
 //   [REQ-001] SQL<SELECT * FROM users>
 //   UserRepo disposed
 //   DbPool active capturers: 0
 //
-// DbPool stays warm on `app` for Request #2, and closes only when `app` exits.
+// DbPool stays warm on `app` for Request #2.
 ```
+
+> **Cleanup & Optional `using`**
+> - **Root container:** You do not need to call `app.dispose()` unless you registered `onDispose` shutdown hooks (such as closing a DB pool or socket) that you want to run on exit.
+> - **Child scopes:** Always call `req.dispose()` when a request/job ends. Besides firing `onDispose`, it detaches child entries from parent singletons' internal `capturedBy` sets so finished scopes can be garbage-collected immediately.
+> - **Optional `using` syntax:** On Node 22+ or builds where your compiler/bundler transpiles Explicit Resource Management (TypeScript, SWC, esbuild), you may optionally write `using req = app.createRequestScope();` instead of `try / finally`. Both `Container` and `Assembler` fall back to `Symbol.for('Symbol.dispose')` automatically when native `Symbol.dispose` is absent (e.g., Safari), with zero global polyfills required.
 
 ### Pass-Scoped Diamonds (`ephemeral()`)
 
-When a single operation fans out into a diamond and both branches need the **same** short-lived object (like a `UnitOfWork` or correlation buffer) without turning it into a singleton or creating a child scope, use `ephemeral()`:
+When a single operation fans out into a diamond and both branches need the **same** short-lived object (like a `UnitOfWork` or correlation buffer) without turning it into a singleton or opening a child scope, use `ephemeral()`:
 
 ```ts
 import {
@@ -221,7 +211,7 @@ class UnitOfWork {
   }
 }
 
-using app = createAssembler();
+const app = createAssembler();
 let nextId = 1;
 
 const UoW = app.createToken<UnitOfWork>('UnitOfWork');
@@ -286,14 +276,14 @@ app.bind(
 
 ---
 
-## 5. Catching Bugs Before Production (Static Lattice Verification)
+## 5. Catching Bugs Before Production (Static Verification)
 
-Traditional DI containers happily boot broken graphs and let them explode in production (e.g., leaking User A's request session into a global singleton, or silently giving two repositories two *different* database transactions).
+Traditional DI containers happily boot broken graphs and let them fail at runtime (leaking User A's request session into a singleton, or silently giving two repositories two *different* transactions).
 
-Here is what happens when you wire four classic bugs and call `app.verify(POLICIES.strict)`:
+Here is what happens when you wire four classic bugs and call `app.assertVerified(POLICIES.strict)`:
 
 ```ts
-using app = createAssembler();
+const app = createAssembler();
 
 const ScopedSession = app.createToken<{ user: string }>('ScopedSession');
 const PassCursor = app.createToken<{ step: number }>('PassCursor');
@@ -353,13 +343,13 @@ All built-in policies compile down to $O(1)$ bitmask operations:
 | `POLICIES.paranoid` | **Maximum decoupling.** Denies everything except `shared-diamond` — including `eviction-coupled` (forces lazy thunks/proxies across all retained boundaries). |
 | `POLICIES.zeroEscapes` | **Security / architecture audit.** Everything in `strict`, **plus** denies any binding that used a local escape-hatch discharge. |
 
-You can also compose custom rules with `createTagPolicy`, `createMaskPolicy`, `composePolicies`, `withExceptions`, `onlyDirectCauses`, and `forbidDischarges`.
+Compose custom rules with `createTagPolicy`, `createMaskPolicy`, `composePolicies`, `withExceptions`, `onlyDirectCauses`, and `forbidDischarges`.
 
 ---
 
 ## 6. Virtual Proxies: Hot Swapping & Async Without an Async Container
 
-Using bare tokens in `inject: [A, B]` eagerly captures them. When you need lazy indirection, wrap the token in a `via*` adapter:
+Using bare tokens in `inject: [A, B]` eagerly captures them. Wrap a token in a `via*` adapter to change how that dependency crosses the boundary:
 
 | Adapter | Injected Type | Kernel Edge | Solves |
 |---|---|---|---|
@@ -372,17 +362,9 @@ Using bare tokens in `inject: [A, B]` eagerly captures them. When you need lazy 
 
 ### How `viaAsync` + `viaLive` Work Together
 
-The core container stays **100% synchronous**. Async resources (like a DB connection handshake or a lazy `import()`) are registered with `registerAsync`, which stores a single cached `Promise<T>` in the synchronous container. Dependents inject `viaAsync(Db)` and call `await this.db.query(...)` directly.
+The core container stays **100% synchronous**. Async resources (like a DB connection handshake or lazy `import()`) are registered with `registerAsync`, which stores a single cached `Promise<T>` in the container. Dependents inject `viaAsync(Db)` and call `await this.db.query(...)` directly.
 
-Even better: you can wrap a **purely synchronous** class (like `SyncHasher`) in `viaAsync(Hasher)` too—useful when your domain interface is async (e.g., future-proofing for a Web Worker, WASM module, or remote RPC).
-
-```text
-  RegistrationService
-     │
-     ├── viaAsync(Db)     ──▶ Promisified<Database>    ──▶ awaits cached Promise<Database>
-     ├── viaAsync(Hasher) ──▶ Promisified<SyncHasher>  ──▶ lifts sync .hash() to Promise<string>
-     └── viaLive(Clock)   ──▶ ClockService (Proxy)     ──▶ resolves latest Clock on every .now()
-```
+You can also wrap a **purely synchronous** class (like `SyncHasher`) in `viaAsync(Hasher)`—useful when your domain interface is async (for example, keeping the door open for a Web Worker, WASM module, or remote RPC later).
 
 ```ts
 import {
@@ -452,7 +434,7 @@ class RegistrationService {
   }
 }
 
-using app = createAssembler();
+const app = createAssembler();
 const ClockTok = app.createToken<Clock>('Clock');
 const HasherTok = app.createToken<SyncHasher>('Hasher');
 const DbTok = app.createToken<Promise<Database>>('Database');
@@ -492,13 +474,13 @@ console.log(await reg.register('piero'));
 // Output: @1700000000000 -> [postgres://primary] INSERT piero (sha256:5)
 ```
 
-> **Note for manual factories:** The exact same proxies are available standalone as `toLiveProxy(thunk)` and `toAsyncProxy(thunk)` when using raw `app.bind()`.
+> **Manual factories:** The exact same proxies are available standalone as `toLiveProxy(thunk)` and `toAsyncProxy(thunk)` when using raw `app.bind()`.
 
 ---
 
 ## 7. Local Escape Hatches (Not Global Policy Rot)
 
-When `POLICIES.strict` warns you about a pattern you **genuinely want**—like snapping a transient `StartupConfig` once at boot (`frozen-none`) or keeping a stateful GC-evictable memo cache (`volatile-state`)—**do not weaken your global policy**. Turning off `frozen-none` globally would hide every *accidental* transient capture in the entire codebase.
+When `POLICIES.strict` flags a pattern you **genuinely want**—like snapping a transient `StartupConfig` once at boot (`frozen-none`) or keeping a stateful GC-evictable memo cache (`volatile-state`)—**do not weaken your global policy**. Turning off `frozen-none` globally would hide every *accidental* transient capture in the codebase.
 
 Instead, discharge the taint **locally at the exact binding site**:
 
@@ -522,7 +504,7 @@ class HttpServer {
   }
 }
 
-using app = createAssembler();
+const app = createAssembler();
 const Config = app.createToken<{ readonly port: number }>('StartupConfig');
 const Server = app.createToken<HttpServer>('HttpServer');
 const Cache = app.createToken<ScoreCache>('ScoreCache');
@@ -546,7 +528,7 @@ app.registerFn(
 // 1. Strict policy: 0 warnings, 0 errors!
 app.assertVerified(POLICIES.strict);
 
-// 2. Audit policy: still sees every discharged escape hatch for security reviews!
+// 2. Audit policy: still flags every discharged escape hatch for security reviews!
 const audit = app.verify(POLICIES.zeroEscapes);
 // audit.ok === false
 //   [DENY] Server -> StartupConfig (direct): [] (discharged: [frozen-none])
@@ -555,18 +537,9 @@ const audit = app.verify(POLICIES.zeroEscapes);
 
 ### Dual-Lattice Diamond Soundness
 
-Discharges never accidentally hide bugs on sibling paths. Active taints join with bitwise **OR** (unsafe if *any* path is tainted), while sanitizations join with bitwise **AND** (safe for an ancestor only if *every* path sanitized it):
+Local discharges never mask bugs on sibling branches. Active taints join across diamond paths with bitwise **OR** (unsafe if *any* path is tainted), while sanitizations join with bitwise **AND** (safe for an ancestor only if *every* path sanitized that bit):
 
-```text
-               DiamondParent
-               /           \
-         Server             SloppySibling
-   (viaSnapshot(Config))   (raw Config — forgot!)
-               \           /
-               StartupConfig
-```
-
-`Server` clears `frozen-none` on its branch, but `SloppySibling` did not—so `DiamondParent` still catches `frozen-none` automatically.
+- If `DiamondParent` captures both `Server` (uses `viaSnapshot(Config)`) and `SloppySibling` (captures raw `Config` without discharging), `DiamondParent` still catches `frozen-none` automatically.
 
 ---
 
@@ -574,10 +547,10 @@ Discharges never accidentally hide bugs on sibling paths. Active taints join wit
 
 ### Deterministic Eviction (`evict()`)
 
-When you manually evict a retained instance (e.g., rotating credentials or resetting between tests), the container applies its `onEvictCaptured` policy (`'cascade'` by default):
+When you evict a retained instance (e.g., rotating credentials or resetting between tests), the container applies its `onEvictCaptured` policy (`'cascade'` by default):
 
 - **`'cascade'` (default):** Reverse-topologically evicts every live capturer *before* evicting the dependency—even across intermediate `transient()` bridges—eliminating split-brain stale references. Dependencies wired via `viaThunk`, `viaLive`, or `viaAsync` are immune.
-- **`'block'`:** Throws a `KernelError` (`code: 'eviction-blocked'`) if anything still captures the token. Calling `dispose()` (or exiting `using`) still succeeds cleanly because retained entries tear down in exact LIFO instantiation order.
+- **`'block'`:** Throws a `KernelError` (`code: 'eviction-blocked'`) if anything still captures the token. Calling `dispose()` still succeeds cleanly because retained entries tear down in exact LIFO instantiation order.
 - **`'orphan'`:** Severs capture links without evicting capturers.
 
 ```ts
@@ -597,7 +570,7 @@ import {
   viaThunk,
 } from '@computerwwwizards/dependency-injection/presets';
 
-using app = createAssembler();
+const app = createAssembler();
 const ApiKey = app.createToken<string>('ApiKey');
 const LegacySdk = app.createToken<{ call(): string }>('LegacySdk');
 const Gateway = app.createToken<{ run(): string }>('Gateway');
@@ -614,7 +587,7 @@ app.bindInsecure(
   }
 );
 
-// Clean code puts LegacySdk behind `viaThunk` (or `viaLive`) as a taint firewall:
+// Clean code places LegacySdk behind `viaThunk` (or `viaLive`) as a taint firewall:
 // `insecure` and `state-leak` do NOT cross the boundary.
 app.registerFn(Gateway, pure({ inject: [viaThunk(LegacySdk)] }), (getSdk) => ({
   run: () => getSdk().call(),
@@ -693,9 +666,9 @@ If a host application or plugin gives you a raw core `Container`, call `extendCo
 
 ```ts
 import { createContainer } from '@computerwwwizards/dependency-injection';
-import { extendContainer, pure } from '@computerwwwizards/dependency-injection/presets';
+import { extendContainer } from '@computerwwwizards/dependency-injection/presets';
 
-using rawHost = createContainer({ allowedStores: ['solid', 'weak'] });
+const rawHost = createContainer({ allowedStores: ['solid', 'weak'] });
 const ext = extendContainer(rawHost);
 
 const Flag = rawHost.createToken<boolean>('DarkMode');
@@ -713,7 +686,7 @@ Need to pass a service into an HTTP router, React context, or external library t
 const dbFacade = app.getAsyncProxy(DbTok);
 
 // Hand `dbFacade` directly to Express/Hono/Fastify handlers:
-app.get('/users', async () => dbFacade.query('SELECT * FROM users'));
+router.get('/users', async () => dbFacade.query('SELECT * FROM users'));
 ```
 
 ---
