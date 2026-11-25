@@ -2576,7 +2576,7 @@ class AssemblerImpl implements Assembler {
 }
 
 
-const extendedContainerCache = new WeakMap<Container, AssemblerImpl>();
+
 
 export function createAssembler(
   options?: CreateOptions | undefined
@@ -2585,21 +2585,20 @@ export function createAssembler(
     options ?? { allowedStores: APP_STORES, onEvictCaptured: 'cascade' }
   );
   const asm = new AssemblerImpl(container);
-  extendedContainerCache.set(container, asm);
+  
   return asm;
 }
+// TODO: Weakly memoized per container (`extendContainer(c) === extendContainer(c)`)
+ // with zero memory leaks and 100% shared stores and `TokenSpace` would be needed?
 
 /**
  * Extends any existing kernel {@link Container} with {@link Assembler}
- * ergonomics. Weakly memoized per container (`extendContainer(c) === extendContainer(c)`)
- * with zero memory leaks and 100% shared stores and `TokenSpace`.
+ * ergonomics. 
  */
 export function extendContainer(container: Container): Assembler {
   if (container instanceof AssemblerImpl) return container;
-  let asm = extendedContainerCache.get(container);
-  if (asm === undefined) {
-    asm = new AssemblerImpl(container);
-    extendedContainerCache.set(container, asm);
-  }
+
+  const asm = new AssemblerImpl(container);
+
   return asm;
 }
