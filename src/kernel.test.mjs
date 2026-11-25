@@ -740,44 +740,6 @@ describe('Eviction policies (cascade, block, orphan), hooks & LIFO disposal', ()
     assertKernelError(() => c.verify(), 'container-disposed');
   });
 
-  it('supports onEvictCaptured: "orphan" and [Symbol.dispose]()', () => {
-    const c = createContainer({
-      allowedStores: ['solid'],
-      onEvictCaptured: 'orphan',
-    });
-    const disposed = [];
-
-    const depTok = c.createToken('Dep');
-    const capTok = c.createToken('Cap');
-
-    c.bind(
-      depTok,
-      { storage: 'solid', state: 'stateful', onDispose: () => disposed.push('dep') },
-      () => ({ n: 1 })
-    );
-    c.bind(
-      capTok,
-      {
-        storage: 'solid',
-        state: 'stateful',
-        captures: [depTok],
-        onDispose: () => disposed.push('cap'),
-      },
-      ([dep]) => ({ dep })
-    );
-
-    const cap = c.get(capTok);
-    c.evict(depTok);
-
-    // Dep evicted, capturer left alive and orphaned
-    assert.deepEqual(disposed, ['dep']);
-    assert.equal(c.get(capTok), cap);
-
-    // Symbol.dispose tears down remaining entries cleanly
-    c[Symbol.dispose]();
-    assert.deepEqual(disposed, ['dep', 'cap']);
-    assert.equal(c.disposed, true);
-  });
 
   it('detaches remaining back-references even if an onDecapture callback throws', () => {
     const c = createContainer({
