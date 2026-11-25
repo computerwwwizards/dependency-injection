@@ -1021,9 +1021,6 @@ export interface Container {
    * marks this container permanently disposed. Idempotent.
    */
   dispose(): void;
-
-  /** Explicit Resource Management alias for {@link dispose} (`using` blocks). */
-  [Symbol.dispose](): void;
 }
 
 /** Signature of the root container factory implemented in `./index.ts`. */
