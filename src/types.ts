@@ -832,11 +832,11 @@ export interface KernelError extends Error {
 // ============================================================================
 // 6. CONTAINER CONTRACT & ROOT FACTORY SIGNATURE
 // ============================================================================
+ // TODO: consider Implements `Disposable` for native `using` explicit resource management?.
 
 /**
  * Synchronous, capture-tracking DI container.
  *
- * Implements `Disposable` for native `using` explicit resource management.
  *
  * **V8 / Implementation Optimization Contract:**
  * 1. **Monomorphic hidden classes:** Internal structs (`InternalBinding`,
@@ -862,7 +862,7 @@ export interface KernelError extends Error {
  *    key on internal binding identity rather than `AnyToken` alone so child
  *    shadowing never corrupts ancestor folds.
  */
-export interface Container extends Disposable {
+export interface Container {
   /** `true` after {@link dispose} has completed. Zero-cost boolean field read. */
   readonly disposed: boolean;
 
