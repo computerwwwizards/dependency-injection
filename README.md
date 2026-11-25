@@ -7,7 +7,7 @@ A synchronous, statically verified dependency assembler for TypeScript 6+.
 - **Catch lifecycle bugs at boot:** Static lattice verification detects captive scopes, split-state diamonds, purity leaks, and cycles *before a single service is instantiated*.
 - **Stay synchronous, stay async-friendly:** Lift any async initializer (or even a synchronous class) into a promisified virtual proxy (`Promisified<T>`) while keeping the container 100% synchronous.
 - **Composable hierarchies:** Split apps into isolated child sub-apps, tenant scopes, plugin sandboxes, or per-request containers with zero parent-side memory leaks.
-- **Universal runtime support:** Runs on Safari, Chrome, Firefox, Node, Deno, and Bun with zero polyfills. Explicit Resource Management (`using` / `Symbol.dispose`) is completely optional.
+- **Universal runtime support:** Runs on Safari, Chrome, Firefox, Node, Deno, and Bun with plain `dispose()`, zero global mutable state, and zero polyfills.
 - **Zero lock-in:** `Assembler` extends the core `Container` directly—same integer tokens, same stores, drop down to raw plumbing or wrap an existing container at any time.
 
 > This guide covers the ergonomic **Assembler & Presets** layer (`@computerwwwizards/dependency-injection/presets`). Documentation for the lower-level core kernel is published separately.
@@ -188,11 +188,11 @@ const pass2 = app.get(Checkout); // Brand new UoW#2, flushed before get() return
 
 ## 4. Child Containers, Sub-Apps & Ownership
 
-You do **not** have to put your entire application into one giant root container. Every `Assembler` can branch into child containers at any depth—sub-apps, micro-frontend islands, tenants, plugins, per-request scopes, or test sandboxes—using three methods:
+You do **not** have to put your entire application into one giant root container. Every `Assembler` can branch into child containers at any depth—sub-apps, micro-frontend islands, tenants, plugins, per-request scopes, or test sandboxes—using `createChild(options)`:
 
-- `parent.createChild(options)` — full sub-app / tenant / plugin container with custom `allowedStores` and `onEvictCaptured`.
-- `parent.createRequestScope(onEvictCaptured?)` — shorthand for `createChild({ allowedStores: ['solid'] })`.
-- `parent.createOverrideScope()` — shorthand for `createChild({ allowedStores: [] })` (pure pass-through override layer that cannot retain its own `solid`/`weak` singletons).
+- `parent.createChild({ allowedStores: ['solid', 'weak'] })` — full sub-app, plugin, or tenant container.
+- `parent.createChild({ allowedStores: ['solid'] })` — lightweight scoped child (e.g., per-request, per-job, or test sandbox).
+- `parent.createChild({ allowedStores: [] })` — zero-retention pass-through override layer (cannot retain its own `solid`/`weak` singletons).
 
 ```text
                     Host Shell (DB Pool, Telemetry, Auth Keys)
@@ -204,7 +204,7 @@ You do **not** have to put your entire application into one giant root container
      Tenant A Scope                                   Request #42 Scope
 ```
 
-### 4.1 Isolated Feature / Plugin Sub-Apps (`createChild`)
+### 4.1 Isolated Feature / Plugin Sub-Apps
 
 Tokens minted on a child container are **strictly private** to that child and its descendants. Sibling sub-apps and the host cannot read, bind, or evict them:
 
@@ -301,7 +301,7 @@ const acmeTenant = host.createChild({ allowedStores: ['solid', 'weak'] });
 acmeTenant.registerValue(TenantId, 'tenant-acme');
 
 // Tier 3: Short-lived Request container inside Tenant
-const req = acmeTenant.createRequestScope();
+const req = acmeTenant.createChild({ allowedStores: ['solid'] });
 try {
   req.registerValue(ReqId, 'req-99');
   req.assertVerified(POLICIES.strict);
@@ -345,12 +345,12 @@ console.log(root.get(Env));                   // "prod"            (parent untou
 
 Swap dependencies in tests without mutating your production wiring:
 
-- **`app.createChild({ allowedStores: ['solid'] })`** (or `createRequestScope()`): Allows overriding any token with `registerValue`, `singleton`, `pure`, `scoped`, or `transient`.
-- **`app.createOverrideScope()`** (`allowedStores: []`): A zero-retention pass-through child for swapping `transient()` or `ephemeral()` fakes while guaranteeing the override layer cannot accidentally retain singletons.
+- **`app.createChild({ allowedStores: ['solid'] })`**: Allows overriding any token with `registerValue`, `singleton`, `pure`, `scoped`, or `transient`.
+- **`app.createChild({ allowedStores: [] })`**: A zero-retention pass-through child for swapping `transient()` or `ephemeral()` fakes while guaranteeing the override layer cannot accidentally retain singletons.
 
 ```ts
 // Pass-through override scope (`allowedStores: []`) — great for transient overrides
-const testOverride = app.createOverrideScope();
+const testOverride = app.createChild({ allowedStores: [] });
 testOverride.bind(ClockTok, transient(), () => ({ now: () => 1_700_000_000_000 }));
 
 // Need `registerValue` or `singleton` mocks? Give the test child a `'solid'` store:
@@ -386,9 +386,9 @@ Understanding **who holds references to whom** is the key to managing child cont
    - Tears down every retained (`solid` and `weak`) instance owned by `subApp` in exact LIFO instantiation order.
    - Removes `subApp`'s entries from every ancestor singleton's `capturedBy` set and fires `onDecapture` on those ancestor singletons.
    - Marks `subApp.disposed === true` (idempotent; further calls throw `KernelError('container-disposed')`).
-   Once your code drops its reference to `subApp`, V8 collects it immediately.
+   Once your code drops its reference to `subApp`, the runtime collects it immediately.
 3. **What if you forget to call `subApp.dispose()`?**
-   - If `subApp` never eagerly captured any parent singleton (or only wired parent singletons via `viaThunk` / `viaLive` / `viaAsync`), V8 still garbage-collects `subApp` as soon as your code drops its reference (its `onDispose` hooks simply won't run).
+   - If `subApp` never eagerly captured any parent singleton (or only wired parent singletons via `viaThunk` / `viaLive` / `viaAsync`), the runtime still garbage-collects `subApp` as soon as your code drops its reference (its `onDispose` hooks simply won't run).
    - If a retained instance inside `subApp` **did** eagerly capture a parent singleton (like `BillingSvc` capturing `Telemetry` or `AuditLog` capturing `DbPool`), that parent singleton's `capturedBy` set holds a reference to the child's entry—pinning the child in memory until either `subApp.dispose()` is called or the parent singleton is evicted. **Always call `dispose()` on children that capture parent singletons.**
 4. **Parent eviction cascades into live children (`host.evict(token)`):**
    Because `capturedBy` tracks live cross-boundary captures, evicting a shared parent singleton (e.g., `host.evict(DbPool)` during credential rotation) automatically cascades into every live child instance that captured `DbPool`, firing their `onDispose` hooks so no sub-app is left holding a stale connection. Unrelated child services and the child container itself remain alive and ready to rebuild cleanly on the next `get()`.
@@ -404,7 +404,7 @@ mountedSubApps.set('search', search);
 function unloadSubApp(name: string): void {
   const sub = mountedSubApps.get(name);
   if (sub === undefined) return;
-  sub.dispose();           // Tears down sub-app in LIFO order + detaches from host
+  sub.dispose();               // Tears down sub-app in LIFO order + detaches from host
   mountedSubApps.delete(name); // Drops client reference -> eligible for GC
 }
 
@@ -417,10 +417,9 @@ function shutdownHost(): void {
 }
 ```
 
-> **Cleanup & Optional `using`**
-> - **Root container:** You only need `app.dispose()` if you registered `onDispose` shutdown hooks you want to run on exit.
-> - **Child containers:** Call `child.dispose()` when the sub-app, tenant, or request ends.
-> - **Optional `using` syntax:** On Node 22+ or builds where your compiler/bundler transpiles Explicit Resource Management (TypeScript, SWC, esbuild), you may optionally write `using req = app.createRequestScope();` instead of `try / finally`. Both `Container` and `Assembler` fall back to `Symbol.for('Symbol.dispose')` automatically when native `Symbol.dispose` is absent (e.g., Safari), with zero global polyfills required.
+> **When to call `dispose()`**
+> - **Root container:** You only need `app.dispose()` if you registered `onDispose` shutdown hooks (closing DB pools, sockets, or timers) that you want to run on exit.
+> - **Child containers:** Call `child.dispose()` in a `finally` block or unmount hook whenever a sub-app, tenant, or request finishes.
 
 ---
 
@@ -836,7 +835,7 @@ Descriptors also work directly on a raw kernel container via `desc.bind(rawConta
 
 ### Extending an Existing Core Container (`extendContainer`)
 
-If a host application or plugin gives you a raw core `Container`, call `extendContainer(rawHost)`. It is weakly memoized (`extendContainer(c) === extendContainer(c)` via `WeakMap`, so it never retains dead containers), adds zero hidden state, and shares the exact same stores and token space:
+If a host application or plugin hands you a raw core `Container`, wrap it with `extendContainer(rawHost)`. It is a lightweight, zero-global-state facade that shares 100% of the underlying container's stores, bindings, and token space—call it once at your module boundary and reuse the returned `Assembler` (so `getLiveProxy` / `getAsyncProxy` stay cached on that facade):
 
 ```ts
 import { createContainer } from '@computerwwwizards/dependency-injection';
@@ -853,7 +852,7 @@ rawHost.get(Flag); // true — 100% shared state
 
 ### Exporting Clean Facades to Routes / UI (`getLiveProxy` & `getAsyncProxy`)
 
-Need to pass a service into an HTTP router, React context, or external library that shouldn't know about containers or tokens? Export a memoized proxy:
+Need to pass a service into an HTTP router, React context, or external library that shouldn't know about containers or tokens? Export a proxy memoized on the `Assembler` instance:
 
 ```ts
 // Works on `Token<Promise<Db>>` or synchronous `Token<Db>`
@@ -869,7 +868,7 @@ router.get('/users', async () => dbFacade.query('SELECT * FROM users'));
 
 | Category | Exports |
 |---|---|
-| **Containers** | `createAssembler(opts?)`, `extendContainer(container)`, `asm.createChild(opts)`, `asm.createRequestScope()`, `asm.createOverrideScope()`, `asm.kernel` |
+| **Containers** | `createAssembler(opts?)`, `extendContainer(container)`, `asm.createChild(opts)`, `asm.kernel` |
 | **Registration** | `registerValue`, `registerClass`, `registerFn`, `registerAsync`, `registerFactory`, `register`, `bind`, `bindInsecure`, `use` |
 | **Lifetime Presets** | `singleton`, `pure`, `scoped`, `transient`, `ephemeral`, `weak`, `memo` |
 | **Injection Adapters** | `viaLive`, `viaAsync`, `viaThunk`, `viaSnapshot`, `viaEscape` |
